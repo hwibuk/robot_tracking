@@ -1,17 +1,13 @@
 #include <Wire.h>
 #include <MPU6050_tockn.h>
 #include <Adafruit_VL53L0X.h>
-#include <SoftwareSerial.h>
 
-// [최적화] 핀 번호 및 상수는 byte로 고정
-const byte RX_PIN = 7;
-const byte TX_PIN = 8;
+// 하드웨어 시리얼(0, 1번 핀)을 사용하므로 SoftwareSerial 라이브러리 제거
 const byte IN1 = 6; const byte IN2 = 5; 
 const byte IN3 = 10; const byte IN4 = 9;
 const byte ENCODER_L = 2; const byte ENCODER_R = 3;
 const byte XSHUT = 4;
 
-SoftwareSerial esp(RX_PIN, TX_PIN);
 MPU6050 mpu(Wire);
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 
@@ -21,15 +17,13 @@ const byte BASE_SPD = 120;
 const float WHEEL_D = 6.5;
 const int TICKS_REV = 40;
 
-// PID (성능 유지를 위해 게인은 그대로)
+// PID
 float Kp = 12.0, Ki = 0.05, Kd = 1.2; 
 float err_int = 0, last_err = 0;
 float tYaw = 0;
 
-volatile long lTick = 0;
-volatile long rTick = 0;
+volatile long lTick = 0, rTick = 0;
 volatile unsigned long lTime = 0, rTime = 0;
-
 unsigned long sTime = 0, pTime = 0;
 bool isRun = false; 
 long tTick = 0;   
@@ -38,11 +32,13 @@ void cL() { unsigned long c = micros(); if (c - lTime > 500) { lTick++; lTime = 
 void cR() { unsigned long c = micros(); if (c - rTime > 500) { rTick++; rTime = c; } }
 
 void setup() {
-  esp.begin(115200);
+  // 하드웨어 시리얼은 115200까지도 매우 안정적입니다.
+  // ESP32의 Serial2.begin 속도와 일치시켜주세요.
+  Serial.begin(115200); 
   Wire.begin();
   
   mpu.begin();
-  mpu.calcGyroOffsets(false); // 가급적 빠르게 셋업
+  mpu.calcGyroOffsets(false);
 
   pinMode(XSHUT, OUTPUT);
   digitalWrite(XSHUT, HIGH);
@@ -50,8 +46,8 @@ void setup() {
 
   pinMode(ENCODER_L, INPUT_PULLUP);
   pinMode(ENCODER_R, INPUT_PULLUP);
-  attachInterrupt(0, cL, RISING); // 2번 핀
-  attachInterrupt(1, cR, RISING); // 3번 핀
+  attachInterrupt(0, cL, RISING); 
+  attachInterrupt(1, cR, RISING); 
 
   pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
@@ -60,8 +56,9 @@ void setup() {
 void loop() {
   mpu.update();
 
-  if (esp.available()) {
-    char c = esp.read();
+  // ESP32에서 오는 명령 수신
+  if (Serial.available()) {
+    char c = Serial.read();
     if (c == 'w') {
       tTick = (long)((TARGET_DIST / (WHEEL_D * 3.14159)) * TICKS_REV);
       lTick = 0; rTick = 0; err_int = 0; last_err = 0;
@@ -76,6 +73,7 @@ void loop() {
 
   if (isRun) drv();
 
+  // 송신 주기를 100ms로 조절하여 데이터 흐름을 안정화
   if (millis() - sTime >= 50) {
     snd();
     sTime = millis();
@@ -95,7 +93,6 @@ void drv() {
   float cor = (Kp * err) + (Ki * err_int) + (Kd * (err - last_err) / dt);
   last_err = err;
 
-  // 부호 해결된 로직 유지
   analogWrite(IN1, constrain(BASE_SPD + (int)cor, 0, 255)); digitalWrite(IN2, LOW);
   analogWrite(IN3, constrain(BASE_SPD - (int)cor, 0, 255)); digitalWrite(IN4, LOW);
 }
@@ -104,12 +101,12 @@ void snd() {
   VL53L0X_RangingMeasurementData_t m;
   lox.rangingTest(&m, false);
   
-  // [최적화] 시리얼 출력 문자열 통합 및 F() 매크로
-  esp.print(F("D,"));
-  esp.print((int)mpu.getAngleZ()); esp.print(F(",")); // 각도는 정수로 변환해 전송 (메모리 절약)
-  esp.print(lTick); esp.print(F(","));
-  esp.print(rTick); esp.print(F(","));
-  esp.println((m.RangeStatus != 4) ? m.RangeMilliMeter : -1);
+  // Serial로 직접 전송 (ESP32의 Serial2로 들어감)
+  Serial.print(F("DATA,"));
+  Serial.print((int)mpu.getAngleZ()); Serial.print(F(","));
+  Serial.print(lTick); Serial.print(F(","));
+  Serial.print(rTick); Serial.print(F(","));
+  Serial.println((m.RangeStatus != 4) ? m.RangeMilliMeter : -1);
 }
 
 void bck() { digitalWrite(IN1, LOW); analogWrite(IN2, BASE_SPD); digitalWrite(IN3, LOW); analogWrite(IN4, BASE_SPD); }
