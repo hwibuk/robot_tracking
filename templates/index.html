@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <title>Robot Control Dashboard v3</title>
+    <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header>
+        <h1>Robot Management System v3</h1>
+    </header>
+
+    <div class="main-container">
+        <div id="video-container">
+            <img src="http://localhost:8080/stream?topic=/image_raw" alt="Camera Feed">
+        </div>
+
+        <div class="side-panel">
+            <div class="card chart-card">
+                <h3>Real-time Latency (ms)</h3>
+                <canvas id="latencyChart"></canvas>
+            </div>
+
+            <div class="card status-card">
+                <div class="status-item"><span class="status-label">Connection:</span><span id="status-msg" class="status-val">Waiting...</span></div>
+                <div class="status-item"><span class="status-label">Latency:</span><span id="latency-text" class="latency-val">-</span> ms</div>
+                <div class="status-item"><span class="status-label">Current Command:</span><span id="cmd-text" class="status-val" style="color:var(--success-color)">STOP</span></div>
+            </div>
+
+            <div id="control-pad">
+                <div class="d-btn" id="btn-up" onclick="sendCommand('w')"><span class="arrow">↑</span></div>
+                <div class="d-btn" id="btn-left" onclick="sendCommand('a')"><span class="arrow">←</span></div>
+                <div class="d-btn" id="btn-stop" onclick="sendCommand(' ')"><span class="arrow">■</span></div>
+                <div class="d-btn" id="btn-right" onclick="sendCommand('d')"><span class="arrow">→</span></div>
+                <div class="d-btn" id="btn-down" onclick="sendCommand('s')"><span class="arrow">↓</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

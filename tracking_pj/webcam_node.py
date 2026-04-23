@@ -7,7 +7,7 @@ from sensor_msgs.msg import Image
 class CameraNode(Node):
     def __init__(self):
         super().__init__('webcam_node')
-        self.publisher_ = self.create_publisher(Image, 'image', 1)
+        self.publisher_ = self.create_publisher(Image, 'image_raw', 1)
         self.timer = self.create_timer(0.033, self.timer_callback)
 
         # 1. 0번 카메라 지정 및 V4L2 드라이버 사용
