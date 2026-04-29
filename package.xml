@@ -7,15 +7,25 @@
   <maintainer email="hwibuk@todo.todo">hwibuk</maintainer>
   <license>Apache License 2.0</license>
 
+  <!-- 기본 의존성 -->
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>cv_bridge</depend>
 
+  <!-- [추가] YAML 설정 파일을 읽기 위한 파이썬 라이브러리 -->
+  <exec_depend>python3-yaml</exec_depend>
+
+  <!-- 실행 시 필요한 ROS 2 도구 및 서버 -->
   <exec_depend>rosbridge_server</exec_depend>
   <exec_depend>web_video_server</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

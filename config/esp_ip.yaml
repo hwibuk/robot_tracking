@@ -1,0 +1,8 @@
+# esp_ip.yaml
+robots:
+  robot_0:
+    ip: "192.168.0.18"
+    port: 12345
+  robot_1:
+    ip: "192.168.0.29"
+    port: 12345

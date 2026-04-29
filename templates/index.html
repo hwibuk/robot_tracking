@@ -14,7 +14,8 @@
 
     <div class="main-container">
         <div id="video-container">
-            <img src="http://localhost:8080/stream?topic=/image_raw" alt="Camera Feed">
+            <!-- [수정] id="remote-video" 추가, src는 JS에서 동적으로 삽입함 -->
+            <img id="remote-video" src="" alt="Camera Feed" style="width: 100%; height: auto; background-color: #000;">
         </div>
 
         <div class="side-panel">
@@ -31,6 +32,7 @@
 
             <div id="control-pad">
                 <div class="d-btn" id="btn-up" onclick="sendCommand('w')"><span class="arrow">↑</span></div>
+                <!-- 중간 열 배치를 위해 CSS에서 flex나 grid를 사용 중인지 확인하세요 -->
                 <div class="d-btn" id="btn-left" onclick="sendCommand('a')"><span class="arrow">←</span></div>
                 <div class="d-btn" id="btn-stop" onclick="sendCommand(' ')"><span class="arrow">■</span></div>
                 <div class="d-btn" id="btn-right" onclick="sendCommand('d')"><span class="arrow">→</span></div>
