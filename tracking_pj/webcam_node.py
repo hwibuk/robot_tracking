@@ -1,48 +1,122 @@
 import rclpy
 from rclpy.node import Node
 import cv2
-from cv_bridge import CvBridge
+import numpy as np
+import math
+import os
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Pose2D
+from cv_bridge import CvBridge
 
-class CameraNode(Node):
+class ArucoDetector(Node):
     def __init__(self):
-        super().__init__('webcam_node')
-        self.publisher_ = self.create_publisher(Image, 'image_raw', 1)
-        self.timer = self.create_timer(0.033, self.timer_callback)
+        super().__init__('aruco_detector')
+        self.bridge = CvBridge()
 
-        # 1. 0번 카메라 지정 및 V4L2 드라이버 사용
+        # 1. 캘리브레이션 데이터 로드
+        self.load_params()
+
+        # 2. 통신 설정
+        self.sub_image = self.create_subscription(Image, '/usb_camera/image_raw', self.image_callback, 10)
+        self.pub_pose = self.create_publisher(Pose2D, '/target/relative_pose', 10)
+        self.pub_debug_img = self.create_publisher(Image, '/camera/debug_image', 10)
+
+        # 3. 아루코 설정
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.aruco_params = cv2.aruco.DetectorParameters_create()
+        self.get_logger().info("Aruco Detector Node Started")
+
+    def load_params(self):
+        path = '/home/hwibuk/ros2_ws/src/tracking_pj/tracking_pj/calibration_data.npz'
+        if not os.path.exists(path):
+            self.get_logger().error(f"Calibration file missing: {path}")
+            return
+        data = np.load(path)
+        self.mtx, self.dist = data['mtx'], data['dist']
+
+    def image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+
+        if ids is not None:
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, 5.0, self.mtx, self.dist)
+            id_list = ids.flatten().tolist()
+
+            if 0 in id_list and 1 in id_list:
+                i0, i1 = id_list.index(0), id_list.index(1)
+
+                # 좌표 계산 및 시각화용 포인트 추출
+                img_c1, _ = cv2.projectPoints(np.array([[0,0,0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
+                img_h1, _ = cv2.projectPoints(np.array([[0,15,0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
+                img_t0, _ = cv2.projectPoints(np.array([[0,6,0]], dtype=np.float32), rvecs[i0], tvecs[i0], self.mtx, self.dist)
+
+                p1, p2, p3 = img_c1[0][0], img_h1[0][0], img_t0[0][0]
+
+                # 각도 및 거리 계산
+                angle = math.degrees(math.atan2(p3[1]-p1[1], p3[0]-p1[0]) - math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
+                while angle > 180: angle -= 360
+                while angle < -180: angle += 360
+                dist = np.linalg.norm(tvecs[i0] - tvecs[i1])
+
+                # 결과 발행 (x에 거리, theta에 각도 저장)
+                self.pub_pose.publish(Pose2D(x=float(dist), y=0.0, theta=float(angle)))
+
+                # 디버그 영상 생성
+                cv2.line(frame, tuple(p2.astype(int)), tuple(p3.astype(int)), (255,0,0), 2)
+                cv2.putText(frame, f"{dist:.1f}cm", (10,30), 1, 1.5, (0,255,0), 2)
+
+        cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+        self.pub_debug_img.publish(self.bridge.cv2_to_imgmsg(frame, encoding="bgr8"))
+
+def main(args=None):
+    rclpy.init(args=args)
+    rclpy.spin(ArucoDetector())
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+(ros2 jazzy py3)hwibuk@DESKTOP-J33DTMP:~/ros2_ws/src/tracking_pj/tracking_pj$ cat webcam_node.py
+import rclpy
+from rclpy.node import Node
+import cv2
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+class ImagePublisher(Node):
+    def __init__(self):
+        super().__init__('image_publisher')
+        self.pub_image = self.create_publisher(Image, '/usb_camera/image_raw', 10)
+
+        # 카메라 설정 (인덱스 0이 안되면 2나 4 시도)
         self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-
-        # 2. MJPG 압축 포맷 및 해상도 강제 지정 (WSL2 병목 현상 해결)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
         self.bridge = CvBridge()
+        self.timer = self.create_timer(0.033, self.timer_callback) # 약 30fps
+        self.get_logger().info("Image Publisher Node Started")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
         if ret:
-            frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_NEAREST)
-            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-            self.publisher_.publish(msg)
+            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            self.pub_image.publish(img_msg)
         else:
-            self.get_logger().error('Failed to capture image')
+            self.get_logger().warn("Failed to capture image")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CameraNode()
+    node = ImagePublisher()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.cap.release()
-        cv2.destroyAllWindows()
         node.destroy_node()
-        # 3. 종료 시 발생하는 빨간색 에러 방지용 안전장치
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
