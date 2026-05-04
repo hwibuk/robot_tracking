@@ -2,94 +2,77 @@ import rclpy
 from rclpy.node import Node
 import cv2
 import numpy as np
+import math
+import os
+from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose2D
 from cv_bridge import CvBridge
 
-class MultiArucoTracker(Node):
+class ArucoDetector(Node):
     def __init__(self):
-        super().__init__('multi_aruco_tracker')
+        super().__init__('aruco_detector')
+        self.bridge = CvBridge()
 
-        # ID 0, 1별 퍼블리셔
-        self.pub_0 = self.create_publisher(Pose2D, '/robot_0/pos', 10)
-        self.pub_1 = self.create_publisher(Pose2D, '/robot_1/pos', 10)
+        # 1. 캘리브레이션 데이터 로드
+        self.load_params()
 
-        self.timer = self.create_timer(0.033, self.timer_callback)
+        # 2. 통신 설정
+        self.sub_image = self.create_subscription(Image, '/usb_camera/image_raw', self.image_callback, 10)
+        self.pub_pose = self.create_publisher(Pose2D, '/target/relative_pose', 10)
+        self.pub_debug_img = self.create_publisher(Image, '/camera/debug_image', 10)
 
-        # --- 업데이트된 캘리브레이션 데이터 ---
-        self.mtx = np.array([[1459.88, 0.0, 326.34],
-                             [0.0, 1600.67, 244.17],
-                             [0.0, 0.0, 1.0]])
-        # 왜곡 계수 업데이트
-        self.dist = np.array([0.00226, 9.375, -0.0115, 0.00222, -104.07])
-
-        self.marker_length_cm = 5.0
-
-        # 카메라 설정
-        self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
+        # 3. 아루코 설정
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters_create()
+        self.get_logger().info("Aruco Detector Node Started")
 
-    def timer_callback(self):
-        ret, frame = self.cap.read()
-        if not ret: return
+    def load_params(self):
+        path = '/home/hwibuk/ros2_ws/src/tracking_pj/tracking_pj/calibration_data.npz'
+        if not os.path.exists(path):
+            self.get_logger().error(f"Calibration file missing: {path}")
+            return
+        data = np.load(path)
+        self.mtx, self.dist = data['mtx'], data['dist']
 
+    def image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
 
         if ids is not None:
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                corners, self.marker_length_cm, self.mtx, self.dist
-            )
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, 5.0, self.mtx, self.dist)
+            id_list = ids.flatten().tolist()
 
-            for i in range(len(ids)):
-                marker_id = ids[i][0]
+            if 0 in id_list and 1 in id_list:
+                i0, i1 = id_list.index(0), id_list.index(1)
 
-                if marker_id in [0, 1]:
-                    # --- 각도(Theta) 0~359 변환 로직 ---
-                    c = corners[i][0]
-                    # 마커의 윗변 방향 벡터 기반 각도 계산
-                    radians = np.arctan2(c[1][1] - c[0][1], c[1][0] - c[0][0])
-                    degrees = np.degrees(radians)
-                    theta_360 = float((degrees + 360) % 360)
+                # 좌표 계산 및 시각화용 포인트 추출
+                img_c1, _ = cv2.projectPoints(np.array([[0,0,0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
+                img_h1, _ = cv2.projectPoints(np.array([[0,15,0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
+                img_t0, _ = cv2.projectPoints(np.array([[0,6,0]], dtype=np.float32), rvecs[i0], tvecs[i0], self.mtx, self.dist)
 
-                    msg = Pose2D()
-                    # tvecs 결과값 (cm) 적용
-                    msg.x = float(tvecs[i][0][0])
-                    msg.y = float(tvecs[i][0][1])
-                    msg.theta = theta_360
+                p1, p2, p3 = img_c1[0][0], img_h1[0][0], img_t0[0][0]
 
-                    if marker_id == 0:
-                        self.pub_0.publish(msg)
-                    elif marker_id == 1:
-                        self.pub_1.publish(msg)
+                # 각도 및 거리 계산
+                angle = math.degrees(math.atan2(p3[1]-p1[1], p3[0]-p1[0]) - math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
+                while angle > 180: angle -= 360
+                while angle < -180: angle += 360
+                dist = np.linalg.norm(tvecs[i0] - tvecs[i1])
 
-                    # 디버깅 로그
-                    self.get_logger().info(f"ID:{marker_id} | X:{msg.x:.1f}cm Y:{msg.y:.1f}cm Angle:{int(theta_360)}°")
+                # 결과 발행 (x에 거리, theta에 각도 저장)
+                self.pub_pose.publish(Pose2D(x=float(dist), y=0.0, theta=float(angle)))
 
-                    # 시각화 (좌표축 그리기)
-                    cv2.drawFrameAxes(frame, self.mtx, self.dist, rvecs[i], tvecs[i], 2.0)
+                # 디버그 영상 생성
+                cv2.line(frame, tuple(p2.astype(int)), tuple(p3.astype(int)), (255,0,0), 2)
+                cv2.putText(frame, f"{dist:.1f}cm", (10,30), 1, 1.5, (0,255,0), 2)
 
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-
-        cv2.imshow('Aruco Tracker Optimized', frame)
-        cv2.waitKey(1)
+        cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+        self.pub_debug_img.publish(self.bridge.cv2_to_imgmsg(frame, encoding="bgr8"))
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MultiArucoTracker()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.cap.release()
-        cv2.destroyAllWindows()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    rclpy.spin(ArucoDetector())
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -1,48 +1,43 @@
 import rclpy
 from rclpy.node import Node
 import cv2
-from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
-class CameraNode(Node):
+class ImagePublisher(Node):
     def __init__(self):
-        super().__init__('webcam_node')
-        self.publisher_ = self.create_publisher(Image, 'image_raw', 1)
-        self.timer = self.create_timer(0.033, self.timer_callback)
+        super().__init__('image_publisher')
+        self.pub_image = self.create_publisher(Image, '/usb_camera/image_raw', 10)
 
-        # 1. 0번 카메라 지정 및 V4L2 드라이버 사용
+        # 카메라 설정 (인덱스 0이 안되면 2나 4 시도)
         self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-
-        # 2. MJPG 압축 포맷 및 해상도 강제 지정 (WSL2 병목 현상 해결)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
         self.bridge = CvBridge()
+        self.timer = self.create_timer(0.033, self.timer_callback) # 약 30fps
+        self.get_logger().info("Image Publisher Node Started")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
         if ret:
-            frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_NEAREST)
-            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-            self.publisher_.publish(msg)
+            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            self.pub_image.publish(img_msg)
         else:
-            self.get_logger().error('Failed to capture image')
+            self.get_logger().warn("Failed to capture image")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CameraNode()
+    node = ImagePublisher()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         node.cap.release()
-        cv2.destroyAllWindows()
         node.destroy_node()
-        # 3. 종료 시 발생하는 빨간색 에러 방지용 안전장치
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
