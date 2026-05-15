@@ -88,7 +88,7 @@ window.onload = function() {
     function updateVideoStream() {
         const videoElement = document.getElementById('remote-video');
         if (videoElement) {
-            const topicName = '/usb_camera/image_raw';
+            const topicName = '/camera/debug_image';
             // web_video_server(8080 포트)를 통해 MJPEG 스트림 수신
             videoElement.src = `http://${window.location.hostname}:8080/stream?topic=${topicName}`;
         }

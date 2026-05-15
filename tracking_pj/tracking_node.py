@@ -1,149 +1,92 @@
 import rclpy
 from rclpy.node import Node
-import cv2
-import numpy as np
-import math
 import time
-import os
-import sys # 시스템 종료를 위해 추가
-
 from geometry_msgs.msg import Pose2D
 from std_msgs.msg import String
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
 
-class MultiArucoFollower(Node):
+class RobotController(Node):
     def __init__(self):
-        super().__init__('multi_aruco_follower')
+        super().__init__('robot_controller')
 
-        # --- 1. .npz 파일 로드 (실패 시 노드 종료) ---
-        self.load_camera_params_npz()
-
-        # --- 2. ROS 통신 설정 ---
-        self.bridge = CvBridge()
-        self.pub_image = self.create_publisher(Image, '/usb_camera/image_raw', 10)
-        self.pub_action = self.create_publisher(Pose2D, '/robot_1/action', 10)
-        self.sub_status = self.create_subscription(String, '/robot_1/status', self.status_callback, 10)
-
-        # --- 3. 제어 및 상태 변수 ---
-        self.REVERSE_DRIVE = False
+        # --- [설정값] ---
+        self.STOP_DISTANCE = 40.0
         self.REVERSE_STEER = True
-        self.STOP_DISTANCE = 30.0
-        self.robot_status = "IDLE"
-        self.last_command_time = 0
-        self.MIN_COMMAND_INTERVAL = 0.1
-        self.sent_stop = False
+        self.SEND_INTERVAL = 0.1     # 일반 액션 명령 전송 주기 (10Hz)
+        self.SAFETY_TIMEOUT = 0.1    # 아루코 인식 상실 타임아웃 (0.1초)
 
-        # --- 4. 카메라 하드웨어 설정 ---
-        self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # --- [상태 변수] ---
+        self.last_pose_time = time.time()  # 마지막 아루코 인식 시간
+        self.last_sent_time = 0            # 마지막 액션 명령 전송 시간
+        self.is_tracking = False           # 현재 주행 중인지 여부
 
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.aruco_params = cv2.aruco.DetectorParameters_create()
+        # --- [통신 설정] ---
+        self.sub_pose = self.create_subscription(Pose2D, '/target/relative_pose', self.pose_callback, 10)
+        self.pub_action = self.create_publisher(Pose2D, '/robot_1/action', 10)
 
-        self.timer = self.create_timer(0.033, self.timer_callback)
-        self.get_logger().info("Node Started. Camera params loaded successfully.")
+        # 워치독 타이머: 0.1초 인식을 놓쳤는지 아주 빈번하게(0.02초마다) 감시
+        self.create_timer(0.02, self.safety_watchdog)
 
-    def load_camera_params_npz(self):
-        """지정된 절대 경로에서 캘리브레이션 파일을 로드합니다. 실패 시 프로세스를 종료합니다."""
-        file_path = '/home/hwibuk/ros2_ws/src/tracking_pj/tracking_pj/calibration_data.npz'
+        self.get_logger().info("Robot Controller: 0.1s Action Interval & 0.1s Watchdog Active")
 
-        # 파일 존재 여부 확인
-        if not os.path.exists(file_path):
-            self.get_logger().error(f"CRITICAL ERROR: 파일을 찾을 수 없습니다 -> {file_path}")
-            self.get_logger().error("캘리브레이션 파일 없이 노드를 실행할 수 없어 종료합니다.")
-            sys.exit(1) # 프로세스 강제 종료
+    def pose_callback(self, msg):
+        """
+        아루코 노드로부터 데이터 수신 시 실행
+        """
+        now = time.time()
+        self.last_pose_time = now  # 아루코가 인식될 때마다 시간 업데이트
 
-        try:
-            data = np.load(file_path)
-            # 파일 안에 mtx와 dist 키가 있는지 확인
-            if 'mtx' not in data or 'dist' not in data:
-                raise KeyError("npz 파일 내에 'mtx' 또는 'dist' 데이터가 포함되어 있지 않습니다.")
+        dist = msg.x
+        angle = msg.theta
 
-            self.mtx = data['mtx']
-            self.dist = data['dist']
-            self.get_logger().info(f"성공적으로 캘리브레이션 데이터를 로드했습니다: {file_path}")
+        # [핵심 로직] 일반 주행 명령은 0.1초 간격(SEND_INTERVAL)으로만 전송
+        if now - self.last_sent_time >= self.SEND_INTERVAL:
+            cmd = Pose2D()
 
-        except Exception as e:
-            self.get_logger().error(f"CRITICAL ERROR: 데이터 로드 중 오류 발생: {e}")
-            sys.exit(1) # 프로세스 강제 종료
+            if dist < self.STOP_DISTANCE:
+                # 목표 거리에 도달했을 때 정지
+                self.stop_robot("Target Reached")
+            else:
+                # 일반 주행 명령 생성 및 전송
+                self.is_tracking = True
+                cmd.x = dist
+                cmd.theta = -angle if self.REVERSE_STEER else angle
+                self.pub_action.publish(cmd)
+                self.last_sent_time = now
+                # self.get_logger().info(f"Command Sent (0.1s interval): Dist {dist:.1f}")
 
-    def status_callback(self, msg):
-        self.robot_status = msg.data
+    def safety_watchdog(self):
+        """
+        주행 명령 주기와 상관없이, 아루코 인식이 끊기면 즉시 개입
+        """
+        # 주행 중일 때만 감시
+        if self.is_tracking:
+            elapsed_time = time.time() - self.last_pose_time
 
-    def timer_callback(self):
-        ret, frame = self.cap.read()
-        if not ret: return
+            # 아루코 인식을 놓친 지 0.1초가 넘었는가?
+            if elapsed_time > self.SAFETY_TIMEOUT:
+                # 주행 주기(0.1초)를 기다리지 않고 즉시 정지 명령 전송
+                self.stop_robot("MARKER LOST (Immediate Interrupt)")
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+    def stop_robot(self, reason):
+        """
+        정지 명령을 즉시 발행하고 상태를 초기화
+        """
+        stop_cmd = Pose2D(x=0.0, y=0.0, theta=0.0)
+        self.pub_action.publish(stop_cmd)
 
-        if ids is not None:
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, 5.0, self.mtx, self.dist)
-            id_list = ids.flatten().tolist()
-
-            if 0 in id_list and 1 in id_list:
-                try:
-                    i0, i1 = id_list.index(0), id_list.index(1)
-
-                    img_c1, _ = cv2.projectPoints(np.array([[0, 0, 0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
-                    img_h1, _ = cv2.projectPoints(np.array([[0, 15.0, 0]], dtype=np.float32), rvecs[i1], tvecs[i1], self.mtx, self.dist)
-                    img_t0, _ = cv2.projectPoints(np.array([[0, 6.0, 0]], dtype=np.float32), rvecs[i0], tvecs[i0], self.mtx, self.dist)
-
-                    pt_c1 = tuple(img_c1.astype(int).ravel())
-                    pt_h1 = tuple(img_h1.astype(int).ravel())
-                    pt_t0 = tuple(img_t0.astype(int).ravel())
-
-                    vec_robot = np.array([pt_h1[0] - pt_c1[0], pt_h1[1] - pt_c1[1]])
-                    vec_target = np.array([pt_t0[0] - pt_c1[0], pt_t0[1] - pt_c1[1]])
-                    rel_angle = math.degrees(math.atan2(vec_target[1], vec_target[0]) - math.atan2(vec_robot[1], vec_robot[0]))
-
-                    while rel_angle > 180: rel_angle -= 360
-                    while rel_angle < -180: rel_angle += 360
-
-                    real_dist = np.linalg.norm(tvecs[i0] - tvecs[i1])
-                    current_time = time.time()
-
-                    if real_dist < self.STOP_DISTANCE:
-                        if not self.sent_stop:
-                            self.pub_action.publish(Pose2D(x=0.0, y=0.0, theta=0.0))
-                            self.sent_stop = True
-                    else:
-                        self.sent_stop = False
-                        if self.robot_status == "IDLE" or (current_time - self.last_command_time > self.MIN_COMMAND_INTERVAL):
-                            action = Pose2D()
-                            action.x = -real_dist if self.REVERSE_DRIVE else real_dist
-                            action.theta = -rel_angle if self.REVERSE_STEER else rel_angle
-                            self.pub_action.publish(action)
-                            self.last_command_time = current_time
-
-                    color = (0, 0, 255) if self.sent_stop else (0, 255, 0)
-                    cv2.line(frame, pt_h1, pt_t0, (255, 0, 0), 2)
-                    cv2.circle(frame, pt_h1, 5, color, -1)
-                    cv2.putText(frame, f"{real_dist:.1f}cm", (10, 30), 1, 1.5, (255, 255, 255), 2)
-
-                except Exception:
-                    pass
-
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-
-        try:
-            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-            self.pub_image.publish(img_msg)
-        except Exception as e:
-            self.get_logger().error(f"Publish Error: {e}")
+        # 상태 업데이트를 통해 중복 정지 명령 방지
+        self.is_tracking = False
+        self.last_sent_time = time.time() # 정지 명령도 전송 시간에 포함
+        self.get_logger().warn(f"!!! STOP: {reason} !!!")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MultiArucoFollower()
+    node = RobotController()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.cap.release()
         node.destroy_node()
         rclpy.shutdown()
 

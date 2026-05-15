@@ -7,6 +7,7 @@ import os
 import sys
 from geometry_msgs.msg import Twist, Pose2D
 from std_msgs.msg import Float64, String
+from ament_index_python.packages import get_package_share_directory # 경로 탐색 라이브러리 추가
 
 class SerialBridgeNode(Node):
     def __init__(self):
@@ -20,7 +21,7 @@ class SerialBridgeNode(Node):
         self.robot_name = self.get_parameter('robot_name').get_parameter_value().string_value
         self.default_port = self.get_parameter('port').get_parameter_value().integer_value
 
-        # 2. 외부 YAML 파일에서 IP 불러오기
+        # 2. 외부 YAML 파일에서 IP 불러오기 (동적 경로 사용)
         self.load_config_from_yaml()
 
         # 3. UDP 소켓 설정 (비차단 모드)
@@ -28,9 +29,8 @@ class SerialBridgeNode(Node):
         self.sock.setblocking(False)
 
         # ---------------------------------------------------------
-        # [핵심 수정] 실행 인자가 없어도 무조건 /robot_0 토픽을 보게 설정
+        # 실행 인자가 없어도 무조건 설정된 robot_name 토픽을 보게 설정
         # ---------------------------------------------------------
-        # self.robot_name이 기본값 'robot_0'이므로 /robot_0/cmd_vel이 됨
         target_topic = f'/{self.robot_name}/cmd_vel'
         target_action = f'/{self.robot_name}/action'
 
@@ -47,30 +47,37 @@ class SerialBridgeNode(Node):
         self.echo_pub = self.create_publisher(Float64, f'/{self.robot_name}/latency_echo', 10)
         self.status_pub = self.create_publisher(String, f'/{self.robot_name}/status', 10)
 
-        # 6. 로봇 피드백 수신 타이머
+        # 6. 로봇 피드백 수신 타이머 (100Hz)
         self.create_timer(0.01, self.receive_feedback_callback)
 
     def load_config_from_yaml(self):
-        config_path = '/home/hwibuk/ros2_ws/src/tracking_pj/config/esp_ip.yaml'
-
-        if not os.path.exists(config_path):
-            self.get_logger().error(f'설정 파일 없음: {config_path}')
-            sys.exit(1)
-
+        """
+        패키지의 share 디렉토리 내 config 폴더에서 설정을 로드합니다.
+        """
         try:
+            # 패키지 설치 경로를 자동으로 찾음
+            package_share_dir = get_package_share_directory('tracking_pj')
+            config_path = os.path.join(package_share_dir, 'config', 'esp_ip.yaml')
+
+            if not os.path.exists(config_path):
+                self.get_logger().error(f'설정 파일 없음: {config_path}')
+                sys.exit(1)
+
             with open(config_path, 'r') as f:
                 config_data = yaml.safe_load(f)
-                # robot_0 정보를 가져옴
+                # robot_0(기본값) 정보를 가져옴
                 robot_info = config_data.get('robots', {}).get(self.robot_name)
 
                 if robot_info:
                     self.esp32_ip = robot_info['ip']
                     self.port = robot_info.get('port', self.default_port)
+                    self.get_logger().info(f'설정 로드 성공: {self.esp32_ip}:{self.port}')
                 else:
                     self.get_logger().error(f'YAML에 {self.robot_name} 정보가 없습니다.')
                     sys.exit(1)
+
         except Exception as e:
-            self.get_logger().error(f'파일 로드 에러: {e}')
+            self.get_logger().error(f'파일 로드 에러: {str(e)}')
             sys.exit(1)
 
     def cmd_vel_callback(self, msg):
@@ -78,17 +85,17 @@ class SerialBridgeNode(Node):
         angular_z = msg.angular.z
 
         # 조작 감도 설정 (소수점 값 대응)
-        if linear_x > 0.1: command = 'w'
-        elif linear_x < -0.1: command = 's'
-        elif angular_z > 0.1: command = 'a'
-        elif angular_z < -0.1: command = 'd'
-        else: command = 'x'
+        if linear_x > 0.1: command = 'w\n'
+        elif linear_x < -0.1: command = 's\n'
+        elif angular_z > 0.1: command = 'a\n'
+        elif angular_z < -0.1: command = 'd\n'
+        else: command = 'x\n'
 
         try:
             # 명령을 보내고 터미널에 출력 (확인용)
             self.sock.sendto(command.encode(), (self.esp32_ip, self.port))
-            if command != 'x': # 정지 상태가 아닐 때만 로그 출력
-                self.get_logger().info(f'==> [{self.robot_name}] 전송: {command}')
+            if 'x' not in command: # 정지 상태가 아닐 때만 로그 출력
+                self.get_logger().info(f'==> [{self.robot_name}] 전송: {command.strip()}')
         except Exception as e:
             self.get_logger().error(f'전송 실패: {e}')
 
@@ -108,8 +115,11 @@ class SerialBridgeNode(Node):
 
     def auto_action_callback(self, msg):
         try:
-            if msg.x == 0.0: command = "x"
-            else: command = f"D{msg.x:.2f},A{msg.theta:.2f}\n"
+            if msg.x == 0.0:
+                command = "x\n"
+            else:
+                command = f"D{msg.x:.2f},A{msg.theta:.2f}\n"
+
             self.sock.sendto(command.encode(), (self.esp32_ip, self.port))
         except Exception as e:
             self.get_logger().error(f'Auto Send Error: {e}')

@@ -5,15 +5,13 @@ from launch.actions import ExecuteProcess
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    # 패키지 공유 디렉토리 경로 (설정 파일 로드용)
+    # 패키지 공유 디렉토리 경로
     pkg_share_dir = get_package_share_directory('tracking_pj')
 
-    # Flask 앱 경로 (사용자 소스 경로 유지)
-    app_path = os.path.join('/home/hwibuk/ros2_ws/src/tracking_pj/tracking_pj', 'app.py')
-
+    # Flask 앱 경로
+    app_path = os.path.join(pkg_share_dir, 'tracking_pj', 'app.py')
     return LaunchDescription([
         # 1. 피추적차 브릿지 (robot_0)
-        # 웹 키보드 명령(/robot_0/cmd_vel)을 받아 ID 0번 ESP32로 전달
         Node(
             package='tracking_pj',
             executable='target_serial_bridge_node',
@@ -24,7 +22,6 @@ def generate_launch_description():
         ),
 
         # 2. 추적차 브릿지 (robot_1)
-        # 트래킹 노드 명령(/robot_1/action)을 받아 ID 1번 ESP32로 전달
         Node(
             package='tracking_pj',
             executable='serial_bridge_node',
@@ -34,16 +31,35 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 3. 트래킹 노드 (ArUco 추적 및 명령 계산)
-        # /robot_1/action 토픽으로 추적 명령 발행
+        # --- 분리된 트래킹 시스템 3개 노드 ---
+
+        # 3-1. 웹캠 노드 (영상 획득 및 송출)
         Node(
             package='tracking_pj',
-            executable='tracking_node',
-            name='multi_aruco_follower',
+            executable='webcam_node',
+            name='webcam_node',
             output='screen'
         ),
 
-        # 4. Rosbridge WebSocket (웹과 ROS 통신용)
+        # 3-2. ArUco 포지션 노드 (마커 인식 및 거리/각도 계산)
+        Node(
+            package='tracking_pj',
+            executable='aruco_pos_node',
+            name='aruco_pos_node',
+            output='screen'
+        ),
+
+        # 3-3. 트래킹 컨트롤 노드 (제어 알고리즘 및 명령 발행)
+        Node(
+            package='tracking_pj',
+            executable='tracking_node',
+            name='tracking_controller',
+            output='screen'
+        ),
+
+        # ----------------------------------
+
+        # 4. Rosbridge WebSocket
         Node(
             package='rosbridge_server',
             executable='rosbridge_websocket',
@@ -51,7 +67,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 5. Web Video Server (웹에 카메라 화면 송출용)
+        # 5. Web Video Server
         Node(
             package='web_video_server',
             executable='web_video_server',
